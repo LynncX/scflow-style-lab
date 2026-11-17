@@ -1,0 +1,10 @@
+{
+  "run_name": "baseline_mock",
+  "backend": "mock",
+  "seed": 2025,
+  "manifest": "manifests/baseline_mock.jsonl",
+  "out_root": "runs",
+  "num_steps": 1,
+  "image_size": 64,
+  "save_images": true
+}

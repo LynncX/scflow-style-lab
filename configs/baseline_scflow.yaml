@@ -1,0 +1,12 @@
+run_name: baseline_scflow_1step
+backend: scflow
+seed: 2025
+manifest: manifests/example_scflow.jsonl
+out_root: runs
+num_steps: 1
+save_images: true
+scflow:
+  config: third_party/scflow_pkg/inference.yaml
+  ckpt: ckpts/scflow_last.ckpt
+  unclip_ckpt: ckpts/sd21-unclip-l.ckpt
+  model_type: scflow

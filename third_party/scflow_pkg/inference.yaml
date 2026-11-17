@@ -1,0 +1,14 @@
+model:
+  scale_factor: 0.6304
+  fm:
+    target: scflow.cfm.FlowMatching
+    params:
+      sigma_min: 1.0e-08
+      net_cfg:
+        target: scflow.models.kakaomodels.prior.PriorTransformer
+        params:
+          xf_width: 2048
+          xf_layers: 12
+          xf_heads: 32
+          xf_final_ln: true
+          clip_dim: 1536
