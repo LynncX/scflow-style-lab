@@ -281,10 +281,30 @@ class TrainerModuleSCFlow(LightningModule):
                     noise_level=0,
                     unormalize=False,
                     callback=None,
-                    negative_prompt=""):
-        
-        if self.unclip_model != self.device:
-            self.unclip_model.to(self.device)
+                    negative_prompt="",
+                    device=None):
+
+        sampling_device = self.device if device is None else device
+        unclip = self.unclip_model
+        if device is None:
+            unclip.to(sampling_device)
+        else:
+            # Move the diffusion schedule and noise augmentor without moving the
+            # encoder, denoiser, or VAE. Each stage loads its own weights below.
+            if unclip.device != sampling_device:
+                stage_names = ("embedder", "model", "cond_stage_model", "first_stage_model")
+                stages = {name: getattr(unclip, name) for name in stage_names}
+                try:
+                    for name in stages:
+                        setattr(unclip, name, None)
+                    unclip.to(sampling_device)
+                finally:
+                    for name, stage in stages.items():
+                        setattr(unclip, name, stage)
+            unclip.embedder.cpu()
+            unclip.model.cpu()
+            unclip.first_stage_model.cpu()
+        self.sampler.device = sampling_device
         
         
         # noise level: https://github.com/Stability-AI/stablediffusion/blob/main/doc/UNCLIP.MD
@@ -300,47 +320,54 @@ class TrainerModuleSCFlow(LightningModule):
         # repeat prompts to match batch size (but same prompts)   
         prompts = batch_size * ["detailed, high-quality, 4k"]
 
-        with autocast("cuda"):
-            # use ema weights for evaluation
-            with self.unclip_model.ema_scope():
-                for _ in trange(n_runs, desc="Sampling"):
-                                       
-                    uc = self.unclip_model.get_learned_conditioning(batch_size * [negative_prompt])
-                    if isinstance(prompts, tuple):
-                        prompts = list(prompts)
-                    c = self.unclip_model.get_learned_conditioning(prompts)
+        for _ in trange(n_runs, desc="Sampling"):
+            if device is not None:
+                self.unclip_model.cond_stage_model.to(device)
+            with autocast("cuda"):
+                uc = self.unclip_model.get_learned_conditioning(batch_size * [negative_prompt])
+                c = self.unclip_model.get_learned_conditioning(prompts)
+            if adm_uc is None:
+                adm_uc = torch.zeros_like(adm_cond)
+            c = {"c_crossattn": [c], "c_adm": adm_cond}
+            uc = {"c_crossattn": [uc], "c_adm": adm_uc}
+            if device is not None:
+                self.unclip_model.cond_stage_model.cpu()
+                self.unclip_model.model.to(device)
+            with autocast("cuda", cache_enabled=device is None), self.unclip_model.ema_scope():
+                samples_ddim, _ = self.sampler.sample(
+                    S=ddim_steps,
+                    batch_size=batch_size,
+                    shape=latent_shape,
+                    verbose=False,
+                    conditioning=c,
+                    unconditional_guidance_scale=scale,
+                    unconditional_conditioning=uc,
+                    eta=0.0,
+                    x_T=None,
+                    callback=callback,
+                    ucg_schedule=None,
+                )
+            if device is not None:
+                # Keep only the VAE and its inputs on the GPU during image decoding.
+                self.unclip_model.model.cpu()
+                self.unclip_model.first_stage_model.to(device)
+            with autocast("cuda"):
+                unclip_samples = self.unclip_model.decode_first_stage(samples_ddim)
+            if device is not None:
+                self.unclip_model.first_stage_model.cpu()
 
-                    if adm_uc is None:
-                        adm_uc = adm_cond
-
-                    c = {"c_crossattn": [c], "c_adm": adm_cond} # text -> c_crossattn; clip_img_emb -> c_adm
-                    uc = {"c_crossattn": [uc], "c_adm": adm_uc}
-                            
-                    samples_ddim, _ = self.sampler.sample(S=ddim_steps,
-                                                    batch_size=batch_size,
-                                                    shape=latent_shape,
-                                                    verbose=False,
-                                                    conditioning=c,
-                                                    unconditional_guidance_scale=scale,
-                                                    unconditional_conditioning=uc,
-                                                    eta=0.,
-                                                    x_T=None,
-                                                    callback=callback,
-                                                    ucg_schedule=None
-                                                    )
-                                        
-                    unclip_samples = self.unclip_model.decode_first_stage(samples_ddim)
-                
         return unclip_samples
 
-    def get_sample_to_vis(self, clip_pred, path=None, save=True):
+    def get_sample_to_vis(self, clip_pred, path=None, save=True, device=None, output_size=None):
         if clip_pred.ndim==3:
             # elimninate the 1dim
             clip_pred = clip_pred.squeeze(1)
 
         # scale predicted value back to correct scale
-        fake_ims = self.unclip_sample(clip_pred, ddim_steps=40, unormalize=False)
-        pil_img = tensor_to_pil(fake_ims)
+        dimensions = {} if output_size is None else {"H": output_size, "W": output_size}
+        fake_ims = self.unclip_sample(clip_pred, ddim_steps=40, unormalize=False,
+                                      device=device, **dimensions)
+        pil_img = tensor_to_pil(fake_ims, size=(output_size, output_size)) if output_size else tensor_to_pil(fake_ims)
         if save:
             pil_img.save(path)
 

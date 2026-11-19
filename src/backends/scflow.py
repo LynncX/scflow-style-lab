@@ -30,15 +30,33 @@ class SCFlowBackend(Backend):
     def __init__(self, project_root: Path):
         self.project_root = project_root.resolve()
         self.pkg_root = self.project_root / "third_party" / "scflow_pkg"
+        self._loaded = None
 
     def _prepare_unclip_config(self) -> Path:
-        src = self.pkg_root / "v2-1-stable-unclip-l-inference.yaml"
-        dst = self.pkg_root / "configs" / "v2-1-stable-unclip-l-inference.yaml"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(src.read_bytes())
-        return dst.parent
+        config_dir = self.pkg_root / "configs"
+        config_dir.mkdir(exist_ok=True)
+        for name in ("v2-1-stable-unclip-l-inference.yaml", "ViT-L-14_stats.th"):
+            (config_dir / name).write_bytes((self.pkg_root / name).read_bytes())
+        return self.pkg_root
 
     def infer(self, sample: dict, cfg: dict, out_dir: str) -> BackendResult:
+        # The bundled Stable Diffusion modules also use absolute ldm imports.
+        original_path = sys.path[:]
+        sys.path[:0] = [str(self.pkg_root), str(self.pkg_root / "scflow")]
+        try:
+            return self._infer(sample, cfg, out_dir)
+        except Exception:
+            self._loaded = None
+            raise
+        finally:
+            sys.path[:] = original_path
+
+    def _infer(self, sample: dict, cfg: dict, out_dir: str) -> BackendResult:
+        import torch
+        from omegaconf import OmegaConf
+
+        from scflow.trainer_module import TrainerModuleSCFlow
+
         sc = cfg["scflow"]
         ckpt = self.project_root / sc["ckpt"]
         unclip = self.project_root / sc["unclip_ckpt"]
@@ -46,49 +64,65 @@ class SCFlowBackend(Backend):
             if not path.exists():
                 raise FileNotFoundError(f"Missing {label}: {path}")
 
-        sys.path.insert(0, str(self.pkg_root))
-        try:
-            import torch
-            from omegaconf import OmegaConf
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if torch.cuda.is_available() else torch.device("cpu")
+        )
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        seed = cfg.get("seed")
+        if seed is not None:
+            seed = int(seed)
+            torch.manual_seed(seed)
 
-            from scflow.trainer_module import TrainerModuleSCFlow
-        finally:
-            sys.path.pop(0)
+        config_path = self.project_root / sc.get(
+            "config", "third_party/scflow_pkg/inference.yaml"
+        )
+        steps = int(cfg.get("num_steps", 1))
+        save_images = bool(cfg.get("save_images", True))
+        model_key = (config_path, ckpt, unclip, steps, save_images, seed)
+        model_load_ms = 0.0
+        if self._loaded is None or self._loaded[0] != model_key:
+            self._loaded = None
+            started = time.perf_counter()
+            infer_cfg = OmegaConf.load(config_path)
+            config_dir = self._prepare_unclip_config()
+            cwd = os.getcwd()
+            os.chdir(config_dir)
+            try:
+                module = TrainerModuleSCFlow.load_from_checkpoint(
+                    checkpoint_path=str(ckpt),
+                    fm_cfg=infer_cfg.model.fm,
+                    test_vis=save_images,
+                    unclip_ckpt=str(unclip),
+                    val_step_num=steps,
+                    reverse_inference=False,
+                    strict=False,
+                    map_location="cpu",
+                )
+            finally:
+                os.chdir(cwd)
+            module.eval()
+            self._loaded = (model_key, module)
+            model_load_ms = (time.perf_counter() - started) * 1000
+        else:
+            _, module = self._loaded
 
-        infer_cfg = OmegaConf.load(self.pkg_root / "inference.yaml")
-        infer_cfg.val_step_num = int(cfg.get("num_steps", 1))
-        infer_cfg.unclip_ckpt = str(unclip)
-        infer_cfg.model_type = sc.get("model_type", "scflow")
-
-        config_dir = self._prepare_unclip_config()
-        cwd = os.getcwd()
-        os.chdir(config_dir)
-        try:
-            module = TrainerModuleSCFlow.load_from_checkpoint(
-                checkpoint_path=str(ckpt),
-                fm_cfg=infer_cfg.model.fm,
-                test_vis=bool(cfg.get("save_images", True)),
-                unclip_ckpt=str(unclip),
-                val_step_num=infer_cfg.val_step_num,
-                reverse_inference=False,
-                strict=False,
-                map_location="cpu",
-            )
-        finally:
-            os.chdir(cwd)
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        module = module.to(device)
-        module.eval()
+        module.model.to(device)
 
         encoder = CLIPEncoder(device)
         c = encoder.encode_image(self.project_root / sample["content_path"]).to(device=device, dtype=module.dtype)
         s = encoder.encode_image(self.project_root / sample["style_path"]).to(device=device, dtype=module.dtype)
-        x = torch.cat([c, s], dim=2)
+        x = torch.cat([c, s], dim=-1).unsqueeze(1)
+        del encoder
 
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
         start = time.perf_counter()
         with torch.no_grad():
             pred = module.predict_forward(x)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
         feature_ms = (time.perf_counter() - start) * 1000
         p0, p1 = pred[:, :, :768], pred[:, :, 768:]
         emb_tensor = {
@@ -100,10 +134,19 @@ class SCFlowBackend(Backend):
 
         image_path = None
         decode_ms = 0.0
-        if cfg.get("save_images", True):
-            start = time.perf_counter()
+        if save_images:
             image_path = str(Path(out_dir) / f"{sample['sample_id']}.png")
-            module.get_sample_to_vis(emb_tensor["mean"], path=image_path)
+            module.model.cpu()
+            if seed is not None:
+                torch.manual_seed(seed)
+            output_size = cfg.get("image_size")
+            start = time.perf_counter()
+            module.get_sample_to_vis(
+                emb_tensor["mean"], path=image_path, device=device,
+                output_size=int(output_size) if output_size is not None else None,
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
             decode_ms = (time.perf_counter() - start) * 1000
 
         peak = None
@@ -113,7 +156,7 @@ class SCFlowBackend(Backend):
         return BackendResult(
             embeddings=emb,
             image_path=image_path,
-            nfe=int(cfg.get("num_steps", 1)),
-            timing_ms={"feature_ms": feature_ms, "decode_ms": decode_ms},
+            nfe=steps,
+            timing_ms={"model_load_ms": model_load_ms, "feature_ms": feature_ms, "decode_ms": decode_ms},
             peak_vram_mb=peak,
         )

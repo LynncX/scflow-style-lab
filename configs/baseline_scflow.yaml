@@ -5,6 +5,7 @@ manifest: manifests/example_scflow.jsonl
 out_root: runs
 num_steps: 1
 save_images: true
+image_size: 512
 scflow:
   config: third_party/scflow_pkg/inference.yaml
   ckpt: ckpts/scflow_last.ckpt
