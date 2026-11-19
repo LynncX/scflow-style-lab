@@ -1,0 +1,29 @@
+{
+  "scflow": {
+    "directory": "SCFlow",
+    "url": "https://github.com/CompVis/SCFlow.git",
+    "commit": "7c21af7dc3b3cfaff49876337b77b3aae6cfcdf5"
+  },
+  "adain": {
+    "directory": "pytorch-AdaIN",
+    "url": "https://github.com/naoto0804/pytorch-AdaIN.git",
+    "commit": "47950d0e6656a95a80a4b105c4c0f58d38ef785c"
+  },
+  "stytr2": {
+    "directory": "StyTR-2",
+    "url": "https://github.com/diyiiyiii/StyTR-2.git",
+    "commit": "c11ea32913d16dbf2f9a1f82ac077dbf90f143c6",
+    "patch": "patches/stytr2-inference.patch",
+    "patched_files_sha256": {
+      "models/transformer.py": "d0450473fc28ee018eab49f7b1664d17d12b061ff5b84072fad18778ccae6eb2",
+      "models/StyTR.py": "4fcf5c36793bdeb67d477192e1d4a9d6caaa2218154e4ce1c08a5b2f8591a401",
+      "models/ViT_helper.py": "521dd9dfd85b7c4d95b3b94af09223780dc29055e3741d63ac056e01e76a2c4f",
+      "util/misc.py": "97e1442ee26fc5144eeb8815ed9dd4de8f85cdc833590b58f37f40dd205a0ea5"
+    }
+  },
+  "styleid": {
+    "directory": "StyleID",
+    "url": "https://github.com/jiwoogit/StyleID.git",
+    "commit": "d4ea655dc1f7b19e0eac9553ad087132d18bb96f"
+  }
+}

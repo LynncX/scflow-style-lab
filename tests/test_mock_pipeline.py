@@ -3,6 +3,7 @@ import json
 import struct
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -133,6 +134,44 @@ class PipelineTests(unittest.TestCase):
         (self.out / "predictions/second/second.png").write_bytes(b"")
         self.run_pipeline(resume=True)
         self.assertEqual(len(self.records()), 3)
+
+    def test_isolated_worker_pipeline_and_resume(self):
+        self.cfg["worker_command"] = [sys.executable, "-u"]
+        self.save()
+        self.run_pipeline()
+        self.assertEqual([r["status"] for r in self.records()], ["ok", "ok"])
+        self.assertTrue((self.out / "logs/worker.log").is_file())
+        self.run_pipeline(resume=True)
+        self.assertEqual(len(self.records()), 2)
+
+    def test_worker_reuses_process_after_sample_error(self):
+        from backends.worker import WorkerBackend
+        self.out.mkdir()
+        cfg = {**self.cfg, "worker_command": [sys.executable, "-u"]}
+        with __import__("contextlib").closing(WorkerBackend(cfg, Path(__file__).resolve().parents[1], self.out)) as worker:
+            pid = worker.process.pid
+            with self.assertRaisesRegex(RuntimeError, "Requested mock failure"):
+                worker.infer({"sample_id": "bad", "mock_fail": True}, cfg, str(self.out))
+            result = worker.infer({"sample_id": "good"}, cfg, str(self.out))
+            self.assertTrue(Path(result.image_path).exists())
+            self.assertEqual(pid, worker.process.pid)
+            self.assertIsNone(worker.process.poll())
+        self.assertIsNotNone(worker.process.returncode)
+
+    def test_worker_command_is_not_shell_string(self):
+        self.cfg["worker_command"] = "python -u"
+        self.save()
+        with self.assertRaisesRegex(ValueError, "argv list"):
+            self.run_pipeline()
+
+    def test_all_four_methods_in_isolated_worker(self):
+        for method in ("adain", "stytr2", "styleid", "scflow"):
+            self.cfg.update(method=method, worker_command=[sys.executable, "-u"])
+            self.out = self.root / method
+            self.save()
+            self.run_pipeline()
+            self.assertEqual([r["status"] for r in self.records()], ["ok", "ok"])
+            self.assertTrue(all(r["method"] == method and r["simulated"] for r in self.records()))
 
 
 if __name__ == "__main__":

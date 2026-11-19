@@ -1,0 +1,16 @@
+{
+  "run_name": "adain_smoke",
+  "backend": "adain",
+  "method": "adain",
+  "worker_command": [".envs/adain/bin/python", "-u"],
+  "manifest": "manifests/baseline_mock.jsonl",
+  "image_size": 512,
+  "save_images": true,
+  "seed": 2025,
+  "adain": {
+    "source": "third_party/pytorch-AdaIN",
+    "vgg": "assets/weights/adain/vgg_normalised.pth",
+    "decoder": "assets/weights/adain/decoder.pth",
+    "alpha": 1.0
+  }
+}

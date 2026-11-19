@@ -1,0 +1,17 @@
+{
+  "run_name": "stytr2_smoke",
+  "backend": "stytr2",
+  "method": "stytr2",
+  "worker_command": [".envs/stytr2/bin/python", "-u"],
+  "manifest": "manifests/baseline_mock.jsonl",
+  "image_size": 512,
+  "save_images": true,
+  "seed": 2025,
+  "stytr2": {
+    "source": "third_party/StyTR-2",
+    "vgg": "assets/weights/stytr2/vgg_normalised.pth",
+    "decoder": "assets/weights/stytr2/decoder_iter_160000.pth",
+    "transformer": "assets/weights/stytr2/transformer_iter_160000.pth",
+    "embedding": "assets/weights/stytr2/embedding_iter_160000.pth"
+  }
+}

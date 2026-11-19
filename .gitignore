@@ -15,3 +15,10 @@ venv/
 
 *.log
 .DS_Store
+.envs/
+third_party/SCFlow/
+third_party/pytorch-AdaIN/
+third_party/StyTR-2/
+third_party/StyleID/
+assets/weights/
+cache/

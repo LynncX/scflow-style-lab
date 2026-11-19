@@ -1,0 +1,53 @@
+--- a/models/transformer.py
++++ b/models/transformer.py
+@@ -7,8 +7,6 @@
+ from function import normal,normal_style
+ import numpy as np
+ import os
+-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+-os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3"
+ class Transformer(nn.Module):
+ 
+     def __init__(self, d_model=512, nhead=8, num_encoder_layers=3,
+--- a/models/StyTR.py
++++ b/models/StyTR.py
+@@ -204,6 +204,8 @@
+         mask = None
+         hs = self.transformer(style, mask , content, pos_c, pos_s)   
+         Ics = self.decode(hs)
++        if not self.training:
++            return Ics
+ 
+         Ics_feats = self.encode_with_intermediate(Ics)
+         loss_c = self.calc_content_loss(normal(Ics_feats[-1]), normal(content_feats[-1]))+self.calc_content_loss(normal(Ics_feats[-2]), normal(content_feats[-2]))
+--- a/models/ViT_helper.py
++++ b/models/ViT_helper.py
+@@ -30,7 +30,7 @@
+         return drop_path(x, self.drop_prob, self.training)
+ 
+ from itertools import repeat
+-from torch._six import container_abcs
++import collections.abc as container_abcs
+ 
+ 
+ # From PyTorch internals
+--- a/util/misc.py
++++ b/util/misc.py
+@@ -18,7 +18,7 @@
+ 
+ # needed due to empty tensor bug in pytorch and torchvision 0.5
+ import torchvision
+-if float(torchvision.__version__[:3]) < 0.7:
++if tuple(int(part) for part in torchvision.__version__.split(".")[:2]) < (0, 7):
+     from torchvision.ops import _new_empty_tensor
+     from torchvision.ops.misc import _output_size
+ 
+@@ -456,7 +456,7 @@
+     This will eventually be supported natively by PyTorch, and this
+     class can go away.
+     """
+-    if float(torchvision.__version__[:3]) < 0.7:
++    if tuple(int(part) for part in torchvision.__version__.split(".")[:2]) < (0, 7):
+         if input.numel() > 0:
+             return torch.nn.functional.interpolate(
+                 input, size, scale_factor, mode, align_corners

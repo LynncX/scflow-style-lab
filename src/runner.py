@@ -8,7 +8,7 @@ import traceback
 import hashlib
 import re
 import subprocess
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,14 +59,19 @@ def resolve_project_path(value: str, project_root: Path) -> str:
     return str(p if p.is_absolute() else project_root / p)
 
 
-def make_backend(cfg: dict, project_root: Path):
+def make_backend(cfg: dict, project_root: Path, out_dir: Path | None = None):
+    if cfg.get("worker_command"):
+        from backends.worker import WorkerBackend
+        return WorkerBackend(cfg, project_root, out_dir)
     name = cfg["backend"]
     if name == "mock":
         from backends.mock import MockBackend
         return MockBackend()
+    if name == "styleid":
+        raise NotImplementedError(f"Real {name} adapter is not available yet; use backend=mock")
     module = importlib.import_module(f"backends.{name}")
-    cls = getattr(module, {"mock": "MockBackend", "scflow": "SCFlowBackend"}[name])
-    if name == "scflow":
+    cls = getattr(module, {"scflow": "SCFlowBackend", "adain": "AdaINBackend", "stytr2": "StyTr2Backend"}[name])
+    if name in {"scflow", "adain", "stytr2"}:
         return cls(project_root)
     return cls()
 
@@ -117,6 +122,11 @@ def code_revision(project_root: Path) -> dict:
         return {"commit": None, "dirty": None}
 
 
+def file_sha256(path: Path) -> str:
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
 def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: str | None = None, resume: bool = False) -> Path:
     project_root = Path(__file__).resolve().parents[1]
     cfg = apply_overrides(load_config(cfg_path), overrides or [])
@@ -141,8 +151,14 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
                 raise FileNotFoundError(sample[key])
     identity = {"config": cfg, "samples": samples,
                 "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-                "inputs_sha256": {p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+                "inputs_sha256": {p: file_sha256(Path(p))
                     for p in {s[k] for s in samples for k in ("content_path", "style_path")}}}
+    if cfg["backend"] in {"adain", "stytr2"}:
+        options = cfg[cfg["backend"]]
+        from sources import validate_source
+        identity["source"] = validate_source(project_root, cfg["backend"], project_root / options["source"])
+        keys = ["vgg", "decoder"] if cfg["backend"] == "adain" else ["vgg", "decoder", "transformer", "embedding"]
+        identity["weights_sha256"] = {key: file_sha256(project_root / options[key]) for key in keys}
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
     if out_dir_override:
@@ -180,10 +196,9 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
         print(msg)
         print(msg, file=log_file, flush=True)
 
-    with log_file, redirect_stdout(sys.stdout):
+    with log_file, redirect_stdout(sys.stdout), closing(make_backend(cfg, project_root, out_dir)) as backend:
         emit(f"run_dir={out_dir}")
         emit(f"backend={cfg['backend']} samples={len(samples)} resume={resume}")
-        backend = make_backend(cfg, project_root)
 
         for sample in samples:
             sid = sample["sample_id"]
@@ -220,6 +235,7 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
                     "method": method,
                     "simulated": cfg["backend"] == "mock",
                     "artifacts": artifacts,
+                    "provenance": result.provenance,
                 }
                 records.append(record)
                 emit(f"[ok] {sid} {record['total_ms']:.1f}ms")

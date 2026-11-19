@@ -1,0 +1,2 @@
+# Upstream patch contexts contain original CRLF and trailing spaces; preserve verbatim.
+patches/*.patch -text -whitespace
