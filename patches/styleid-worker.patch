@@ -1,0 +1,81 @@
+--- a/run_styleid.py
++++ b/run_styleid.py
+@@ -72,7 +72,7 @@
+ 
+ def load_model_from_config(config, ckpt, verbose=False):
+     print(f"Loading model from {ckpt}")
+-    pl_sd = torch.load(ckpt, map_location="cpu")
++    pl_sd = torch.load(ckpt, map_location="cpu", weights_only=True)
+     if "global_step" in pl_sd:
+         print(f"Global Step: {pl_sd['global_step']}")
+     sd = pl_sd["state_dict"]
+@@ -89,7 +89,7 @@
+     model.eval()
+     return model
+ 
+-def main():
++def main(opt=None, runtime=None):
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--cnt', default = './data/cnt')
+     parser.add_argument('--sty', default = './data/sty')
+@@ -111,18 +111,22 @@
+     parser.add_argument('--output_path', type=str, default='output')
+     parser.add_argument("--without_init_adain", action='store_true')
+     parser.add_argument("--without_attn_injection", action='store_true')
+-    opt = parser.parse_args()
++    parser.add_argument("--seed", type=int, default=22)
++    opt = parser.parse_args() if opt is None else opt
++    runtime = {} if runtime is None else runtime
+ 
+     feat_path_root = opt.precomputed
+ 
+-    seed_everything(22)
++    seed_everything(opt.seed)
+     output_path = opt.output_path
+     os.makedirs(output_path, exist_ok=True)
+     if len(feat_path_root) > 0:
+         os.makedirs(feat_path_root, exist_ok=True)
+     
+-    model_config = OmegaConf.load(f"{opt.model_config}")
+-    model = load_model_from_config(model_config, f"{opt.ckpt}")
++    if "model" not in runtime:
++        model_config = OmegaConf.load(f"{opt.model_config}")
++        runtime["model"] = load_model_from_config(model_config, f"{opt.ckpt}")
++    model = runtime["model"]
+ 
+     self_attn_output_block_indices = list(map(int, opt.attn_layer.split(',')))
+     ddim_inversion_steps = opt.ddim_inv_steps
+@@ -179,8 +183,8 @@
+     precision_scope = autocast if opt.precision=="autocast" else nullcontext
+     uc = model.get_learned_conditioning([""])
+     shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+-    sty_img_list = sorted(os.listdir(opt.sty))
+-    cnt_img_list = sorted(os.listdir(opt.cnt))
++    sty_img_list = [opt.style_file] if getattr(opt, "style_file", None) else sorted(os.listdir(opt.sty))
++    cnt_img_list = [opt.content_file] if getattr(opt, "content_file", None) else sorted(os.listdir(opt.cnt))
+ 
+     begin = time.time()
+     for sty_name in sty_img_list:
+@@ -232,6 +236,9 @@
+                         # inversion
+                         output_name = f"{os.path.basename(cnt_name).split('.')[0]}_stylized_{os.path.basename(sty_name).split('.')[0]}.png"
+ 
++                        if getattr(opt, "sample_id", None):
++                            output_name = opt.sample_id + ".png"
++
+                         print(f"Inversion end: {time.time() - begin}")
+                         if opt.without_init_adain:
+                             adain_z_enc = cnt_z_enc
+--- a/ldm/modules/encoders/modules.py
++++ b/ldm/modules/encoders/modules.py
+@@ -138,8 +138,8 @@
+     """Uses the CLIP transformer encoder for text (from Hugging Face)"""
+     def __init__(self, version="openai/clip-vit-large-patch14", device="cuda", max_length=77):
+         super().__init__()
+-        self.tokenizer = CLIPTokenizer.from_pretrained(version)
+-        self.transformer = CLIPTextModel.from_pretrained(version)
++        self.tokenizer = CLIPTokenizer.from_pretrained(version, local_files_only=True)
++        self.transformer = CLIPTextModel.from_pretrained(version, local_files_only=True)
+         self.device = device
+         self.max_length = max_length
+         self.freeze()

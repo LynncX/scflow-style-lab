@@ -47,15 +47,30 @@ def main():
                 file(str(data_root / sample[key]))
     check("manifest and input files", inputs)
     backend = cfg["backend"]
-    if backend in {"adain", "stytr2"}:
+    if backend in {"adain", "stytr2", "styleid"}:
         options = cfg[backend]
         check("pinned source and patches", lambda: validate_source(ROOT, backend, ROOT / options["source"]))
-        for key in (["vgg", "decoder"] if backend == "adain" else ["vgg", "decoder", "transformer", "embedding"]):
+        keys = {"adain": ["vgg", "decoder"], "stytr2": ["vgg", "decoder", "transformer", "embedding"],
+                "styleid": ["ckpt", "model_config"]}[backend]
+        for key in keys:
             check(f"weight {key}", lambda key=key: file(options[key]))
+        if backend == "styleid":
+            from backends.styleid import make_options
+            check("StyleID fixed-step/cache/options contract", lambda: make_options(ROOT, cfg, {
+                "sample_id": "preflight", "content_path": "content.png", "style_path": "style.png"}, ROOT))
+            for name in ("config.json", "vocab.json", "merges.txt"):
+                check(f"local CLIP {name}", lambda name=name: file(str(Path(options["text_encoder"]) / name)))
+            def clip_weights():
+                directory = ROOT / options["text_encoder"]
+                if not any((directory / name).is_file() for name in ("pytorch_model.bin", "model.safetensors", "pytorch_model.bin.index.json", "model.safetensors.index.json")):
+                    raise FileNotFoundError(f"CLIP model weights: {directory}")
+            check("local CLIP weights", clip_weights)
     elif backend != "mock":
         failures.append("backend")
         print(f"[not implemented] preflight for {backend}; this does not imply its runtime is unavailable")
     def interpreter():
+        if backend in {"adain", "stytr2", "styleid"} and not cfg.get("worker_command"):
+            raise ValueError(f"{backend} requires worker_command for environment isolation")
         command = cfg.get("worker_command", [sys.executable])
         if not isinstance(command, list) or not command or not all(isinstance(s, str) for s in command):
             raise ValueError("worker_command must be an argv list")
@@ -67,6 +82,8 @@ def main():
         modules = [] if backend == "mock" else ["torch", "torchvision", "PIL", "numpy"]
         if backend == "stytr2":
             modules += ["scipy", "einops"]
+        if backend == "styleid":
+            modules += ["omegaconf", "pytorch_lightning", "einops", "transformers", "kornia", "clip", "taming", "tqdm"]
         code = "import importlib.util,json; print(json.dumps([m for m in " + repr(modules) + " if importlib.util.find_spec(m) is None]))"
         result = subprocess.run([executable, *command[1:], "-c", code], cwd=ROOT, check=True,
                                 capture_output=True, text=True, timeout=30)

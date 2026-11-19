@@ -59,19 +59,19 @@ def resolve_project_path(value: str, project_root: Path) -> str:
     return str(p if p.is_absolute() else project_root / p)
 
 
-def make_backend(cfg: dict, project_root: Path, out_dir: Path | None = None):
+def make_backend(cfg: dict, project_root: Path, out_dir: Path | None = None, in_worker: bool = False):
     if cfg.get("worker_command"):
         from backends.worker import WorkerBackend
         return WorkerBackend(cfg, project_root, out_dir)
     name = cfg["backend"]
+    if name in {"adain", "stytr2", "styleid"} and not in_worker:
+        raise ValueError(f"{name} requires worker_command pointing to its isolated Python environment")
     if name == "mock":
         from backends.mock import MockBackend
         return MockBackend()
-    if name == "styleid":
-        raise NotImplementedError(f"Real {name} adapter is not available yet; use backend=mock")
     module = importlib.import_module(f"backends.{name}")
-    cls = getattr(module, {"scflow": "SCFlowBackend", "adain": "AdaINBackend", "stytr2": "StyTr2Backend"}[name])
-    if name in {"scflow", "adain", "stytr2"}:
+    cls = getattr(module, {"scflow": "SCFlowBackend", "adain": "AdaINBackend", "stytr2": "StyTr2Backend", "styleid": "StyleIDBackend"}[name])
+    if name in {"scflow", "adain", "stytr2", "styleid"}:
         return cls(project_root)
     return cls()
 
@@ -153,12 +153,21 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
                 "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 "inputs_sha256": {p: file_sha256(Path(p))
                     for p in {s[k] for s in samples for k in ("content_path", "style_path")}}}
-    if cfg["backend"] in {"adain", "stytr2"}:
+    if cfg["backend"] in {"adain", "stytr2", "styleid"}:
         options = cfg[cfg["backend"]]
         from sources import validate_source
         identity["source"] = validate_source(project_root, cfg["backend"], project_root / options["source"])
-        keys = ["vgg", "decoder"] if cfg["backend"] == "adain" else ["vgg", "decoder", "transformer", "embedding"]
+        keys = {"adain": ["vgg", "decoder"], "stytr2": ["vgg", "decoder", "transformer", "embedding"],
+                "styleid": ["ckpt", "model_config"]}[cfg["backend"]]
         identity["weights_sha256"] = {key: file_sha256(project_root / options[key]) for key in keys}
+        if cfg["backend"] == "styleid":
+            text_encoder = project_root / options["text_encoder"]
+            if not text_encoder.is_dir():
+                raise FileNotFoundError(f"Local CLIP text encoder required: {text_encoder}")
+            identity["text_encoder_sha256"] = {str(p.relative_to(text_encoder)): file_sha256(p)
+                                               for p in sorted(text_encoder.rglob("*")) if p.is_file()}
+            if not identity["text_encoder_sha256"]:
+                raise ValueError("Local CLIP text encoder directory is empty")
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
     if out_dir_override:

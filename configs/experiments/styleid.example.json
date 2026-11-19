@@ -1,0 +1,20 @@
+{
+  "run_name": "styleid_smoke",
+  "backend": "styleid",
+  "method": "styleid",
+  "worker_command": [".envs/styleid/bin/python", "-u"],
+  "manifest": "manifests/baseline_mock.jsonl",
+  "image_size": 512,
+  "save_images": true,
+  "seed": 22,
+  "styleid": {
+    "source": "third_party/StyleID",
+    "ckpt": "assets/weights/styleid/sd-v1-4.ckpt",
+    "text_encoder": "assets/weights/styleid/clip-vit-large-patch14",
+    "model_config": "third_party/StyleID/models/ldm/stable-diffusion-v1/v1-inference.yaml",
+    "cache": false,
+    "precision": "autocast",
+    "T": 1.5,
+    "gamma": 0.75
+  }
+}

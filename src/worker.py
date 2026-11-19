@@ -27,7 +27,7 @@ def main():
                 with redirect_stdout(sys.stderr):
                     if backend is None:
                         initial_config = cfg
-                        backend = make_backend(cfg, Path(__file__).resolve().parents[1])
+                        backend = make_backend(cfg, Path(__file__).resolve().parents[1], in_worker=True)
                     if cfg != initial_config:
                         raise ValueError("Worker config cannot change within a process")
                     result = backend.infer(request["sample"], cfg, request["out_dir"])

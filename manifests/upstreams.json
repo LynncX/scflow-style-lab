@@ -24,6 +24,11 @@
   "styleid": {
     "directory": "StyleID",
     "url": "https://github.com/jiwoogit/StyleID.git",
-    "commit": "d4ea655dc1f7b19e0eac9553ad087132d18bb96f"
+    "commit": "d4ea655dc1f7b19e0eac9553ad087132d18bb96f",
+    "patch": "patches/styleid-worker.patch",
+    "patched_files_sha256": {
+      "run_styleid.py": "6c144bca8b842e47de1a5d9c86829643eefd3aff6f13ec6255f184125127c5d2",
+      "ldm/modules/encoders/modules.py": "61b4211f3dd22bb5741c2c8f9149ae42526b9bd5ae61c0e1ed0d9c58f33f32b0"
+    }
   }
 }

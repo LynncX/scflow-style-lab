@@ -165,6 +165,7 @@ class PipelineTests(unittest.TestCase):
             self.run_pipeline()
 
     def test_all_four_methods_in_isolated_worker(self):
+        from evaluation.inputs import prepare_inputs
         for method in ("adain", "stytr2", "styleid", "scflow"):
             self.cfg.update(method=method, worker_command=[sys.executable, "-u"])
             self.out = self.root / method
@@ -172,6 +173,9 @@ class PipelineTests(unittest.TestCase):
             self.run_pipeline()
             self.assertEqual([r["status"] for r in self.records()], ["ok", "ok"])
             self.assertTrue(all(r["method"] == method and r["simulated"] for r in self.records()))
+            report = prepare_inputs(self.out, allow_simulated=True)
+            self.assertEqual(report["accepted_samples"], 2)
+            self.assertTrue(report["complete"])
 
 
 if __name__ == "__main__":
