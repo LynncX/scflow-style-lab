@@ -1,16 +1,21 @@
-import base64
-import json
 import time
+import struct
+import zlib
 from pathlib import Path
 
 from .base import Backend, BackendResult
 
-PNG_1X1 = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg=="
-)
+def mock_png(size: int) -> bytes:
+    """Solid RGB fixture, not an algorithm prediction."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress((b"\0" + b"\x40\x80\xc0" * size) * size)) + chunk(b"IEND", b""))
 
 class MockBackend(Backend):
     def infer(self, sample: dict, cfg: dict, out_dir: str) -> BackendResult:
+        if sample.get("mock_fail"):
+            raise RuntimeError("Requested mock failure")
         start = time.perf_counter()
         sid = sample["sample_id"]
         digest = __import__("hashlib").sha256(f"{sid}:{cfg.get('seed', 0)}".encode()).digest()
@@ -18,13 +23,13 @@ class MockBackend(Backend):
         image_path = None
         if cfg.get("save_images", True):
             p = Path(out_dir) / f"{sid}.png"
-            p.write_bytes(PNG_1X1)
+            p.write_bytes(mock_png(int(cfg.get("image_size", 64))))
             image_path = str(p)
         elapsed = (time.perf_counter() - start) * 1000
         return BackendResult(
-            embeddings={"0": vec, "1": vec, "mean": vec},
+            embeddings={"0": vec, "1": vec, "mean": vec} if cfg.get("method", "scflow") in {"mock", "scflow"} else {},
             image_path=image_path,
-            nfe=int(cfg.get("num_steps", 1)),
+            nfe=int(cfg.get("num_steps", 1)) if cfg.get("method", "scflow") in {"mock", "scflow"} else None,
             timing_ms={"feature_ms": elapsed, "decode_ms": 0.0},
             peak_vram_mb=None,
         )

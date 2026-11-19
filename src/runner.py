@@ -5,6 +5,9 @@ import os
 import sys
 import time
 import traceback
+import hashlib
+import re
+import subprocess
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +46,10 @@ def apply_overrides(cfg: dict, overrides: list[str]) -> dict:
         if "=" not in item:
             raise ValueError(f"Invalid --set {item!r}; expected key=value")
         key, value = item.split("=", 1)
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            pass
         set_nested(cfg, key, value)
     return cfg
 
@@ -54,6 +61,9 @@ def resolve_project_path(value: str, project_root: Path) -> str:
 
 def make_backend(cfg: dict, project_root: Path):
     name = cfg["backend"]
+    if name == "mock":
+        from backends.mock import MockBackend
+        return MockBackend()
     module = importlib.import_module(f"backends.{name}")
     cls = getattr(module, {"mock": "MockBackend", "scflow": "SCFlowBackend"}[name])
     if name == "scflow":
@@ -62,6 +72,22 @@ def make_backend(cfg: dict, project_root: Path):
 
 
 def load_records(out_dir: Path) -> list[dict]:
+    journal = out_dir / "records.jsonl"
+    if journal.exists():
+        records = []
+        lines = journal.read_text(encoding="utf-8").splitlines(keepends=True)
+        for i, line in enumerate(lines):
+            try:
+                records.append(json.loads(line))
+                if not line.endswith("\n"):
+                    with journal.open("a", encoding="utf-8") as f:
+                        f.write("\n")
+            except json.JSONDecodeError:
+                if i != len(lines) - 1 or line.endswith("\n"):
+                    raise
+                # A killed process may leave an incomplete final append.
+                journal.write_text("".join(lines[:i]), encoding="utf-8")
+        return records
     path = out_dir / "run.json"
     if not path.exists():
         return []
@@ -69,9 +95,26 @@ def load_records(out_dir: Path) -> list[dict]:
     return data.get("samples", [])
 
 
-def sample_complete(sample_dir: Path, sample_id: str) -> bool:
-    required = ["clip_pred_0.json", "clip_pred_1.json", "clip_pred_mean.json"]
-    return all((sample_dir / name).exists() for name in required) and (sample_dir / f"{sample_id}.png").exists()
+def sample_complete(record: dict, out_dir: Path) -> bool:
+    return record.get("status") == "ok" and bool(record.get("artifacts")) and all(
+        (out_dir / name).is_file() and (out_dir / name).stat().st_size > 0
+        for name in record["artifacts"]
+    )
+
+
+def write_json(path: Path, value):
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+    temp.replace(path)
+
+
+def code_revision(project_root: Path) -> dict:
+    try:
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(project_root), *args], text=True).strip()
+        return {"commit": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": None, "dirty": None}
 
 
 def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: str | None = None, resume: bool = False) -> Path:
@@ -79,6 +122,28 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
     cfg = apply_overrides(load_config(cfg_path), overrides or [])
     manifest_path = Path(resolve_project_path(cfg["manifest"], project_root))
     samples = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    method = cfg.get("method", cfg["backend"])
+    if method not in {"mock", "scflow", "adain", "stytr2", "styleid"}:
+        raise ValueError(f"Unknown method: {method}")
+    if cfg["backend"] != "mock" and method != cfg["backend"]:
+        raise ValueError("method must match the real backend")
+    seen = set()
+    data_root = Path(resolve_project_path(cfg.get("data_root", "."), project_root))
+    for sample in samples:
+        sid = sample["sample_id"]
+        if not isinstance(sid, str) or not re.fullmatch(r"[\w-][\w.-]*", sid) or sid in seen:
+            raise ValueError(f"Unsafe or duplicate sample_id: {sid!r}")
+        seen.add(sid)
+        for key in ("content_path", "style_path"):
+            value = Path(sample[key])
+            sample[key] = str(value if value.is_absolute() else data_root / value)
+            if not Path(sample[key]).is_file():
+                raise FileNotFoundError(sample[key])
+    identity = {"config": cfg, "samples": samples,
+                "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                "inputs_sha256": {p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
+                    for p in {s[k] for s in samples for k in ("content_path", "style_path")}}}
+    fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
     if out_dir_override:
         out_dir = Path(out_dir_override)
@@ -87,12 +152,25 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = project_root / cfg.get("out_root", "runs") / f"{cfg['run_name']}_{stamp}"
+    if out_dir.exists() and any(out_dir.iterdir()):
+        snapshot = out_dir / "config.json"
+        if not resume or not snapshot.exists():
+            raise ValueError("Nonempty output directory; use --resume with a compatible config.json, or a new directory")
+        if json.loads(snapshot.read_text())["fingerprint"] != fingerprint:
+            raise ValueError("Configuration, manifest or inputs changed; use a new output directory")
     out_dir.mkdir(parents=True, exist_ok=True)
+    write_json(out_dir / "config.json", {"fingerprint": fingerprint, **identity})
+    provenance_path = out_dir / "provenance.json"
+    if not provenance_path.exists():
+        write_json(provenance_path, {"code": code_revision(project_root),
+                   "python": sys.version, "simulated": cfg["backend"] == "mock",
+                   "note": "Minimal controller provenance; upstream/environment/weight verification not implemented."})
     preds = out_dir / "predictions"
     preds.mkdir(parents=True, exist_ok=True)
 
     records = load_records(out_dir) if resume else []
-    done = {r["sample_id"] for r in records}
+    latest = {r["sample_id"]: r for r in records}
+    done = {sid for sid, record in latest.items() if sample_complete(record, out_dir)}
     errors_path = out_dir / "errors.jsonl"
 
     log_path = out_dir / "log.txt"
@@ -102,7 +180,7 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
         print(msg)
         print(msg, file=log_file, flush=True)
 
-    with redirect_stdout(sys.stdout):
+    with log_file, redirect_stdout(sys.stdout):
         emit(f"run_dir={out_dir}")
         emit(f"backend={cfg['backend']} samples={len(samples)} resume={resume}")
         backend = make_backend(cfg, project_root)
@@ -114,16 +192,21 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
                 continue
             sample_dir = preds / sid
             sample_dir.mkdir(parents=True, exist_ok=True)
-            if resume and sample_complete(sample_dir, sid):
-                emit(f"[skip-complete] {sid}")
-                continue
             started = time.perf_counter()
             try:
                 result = backend.infer(sample, cfg, str(sample_dir))
+                artifacts = []
                 for key, value in result.embeddings.items():
                     if not isinstance(value, list):
                         value = [float(v) for v in value.tolist()]
                     (sample_dir / f"clip_pred_{key}.json").write_text(json.dumps(value), encoding="utf-8")
+                    artifacts.append(str((sample_dir / f"clip_pred_{key}.json").relative_to(out_dir)))
+                if cfg.get("save_images", True):
+                    if not result.image_path or not Path(result.image_path).is_file():
+                        raise ValueError("Backend did not produce the required image")
+                    artifacts.append(str(Path(result.image_path).relative_to(out_dir)))
+                if not artifacts:
+                    raise ValueError("Backend produced no artifacts")
                 record = {
                     "sample_id": sid,
                     "backend": cfg["backend"],
@@ -134,6 +217,9 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
                     "image_path": result.image_path,
                     "total_ms": (time.perf_counter() - started) * 1000,
                     "status": "ok",
+                    "method": method,
+                    "simulated": cfg["backend"] == "mock",
+                    "artifacts": artifacts,
                 }
                 records.append(record)
                 emit(f"[ok] {sid} {record['total_ms']:.1f}ms")
@@ -143,6 +229,8 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
                     "backend": cfg["backend"],
                     **{k: str(v) if isinstance(v, Path) else v for k, v in sample.items()},
                     "status": "error",
+                    "method": method,
+                    "simulated": cfg["backend"] == "mock",
                     "error": str(exc),
                     "traceback": traceback.format_exc(),
                     "total_ms": (time.perf_counter() - started) * 1000,
@@ -152,16 +240,21 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 emit(f"[error] {sid}: {exc}")
 
+            with (out_dir / "records.jsonl").open("a", encoding="utf-8") as journal:
+                journal.write(json.dumps(record, ensure_ascii=False) + "\n")
+                journal.flush()
+                os.fsync(journal.fileno())
+
         summary = {
             "run_name": cfg["run_name"],
             "backend": cfg["backend"],
             "config": cfg,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "samples": records,
+            "simulated": cfg["backend"] == "mock",
+            "samples": list({r["sample_id"]: r for r in records}.values()),
         }
-        (out_dir / "run.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_json(out_dir / "run.json", summary)
         emit(f"summary={out_dir / 'run.json'}")
-    log_file.close()
     return out_dir
 
 
@@ -172,4 +265,7 @@ if __name__ == "__main__":
     p.add_argument("--out-dir", default=None, help="fixed output directory; enables stable resume target")
     p.add_argument("--resume", action="store_true", help="skip completed samples in --out-dir")
     args = p.parse_args()
-    print(run(args.config, args.set, args.out_dir, args.resume))
+    output = run(args.config, args.set, args.out_dir, args.resume)
+    print(output)
+    summary = json.loads((output / "run.json").read_text())
+    sys.exit(1 if any(r["status"] != "ok" for r in summary["samples"]) else 0)

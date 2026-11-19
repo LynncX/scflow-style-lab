@@ -1,0 +1,1 @@
+{"run_name":"mock_styleid","backend":"mock","method":"styleid","seed":2025,"manifest":"manifests/baseline_mock.jsonl","image_size":512,"save_images":true}

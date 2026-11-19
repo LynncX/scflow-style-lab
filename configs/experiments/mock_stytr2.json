@@ -1,0 +1,1 @@
+{"run_name":"mock_stytr2","backend":"mock","method":"stytr2","seed":2025,"manifest":"manifests/baseline_mock.jsonl","image_size":512,"save_images":true}

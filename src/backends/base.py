@@ -5,7 +5,7 @@ from dataclasses import dataclass
 class BackendResult:
     embeddings: dict[str, list[float]]
     image_path: str | None
-    nfe: int
+    nfe: int | None
     timing_ms: dict[str, float]
     peak_vram_mb: float | None = None
 
