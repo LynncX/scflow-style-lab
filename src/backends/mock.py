@@ -26,10 +26,11 @@ class MockBackend(Backend):
             p.write_bytes(mock_png(int(cfg.get("image_size", 64))))
             image_path = str(p)
         elapsed = (time.perf_counter() - start) * 1000
+        is_scflow = cfg.get("method", "scflow") in {"mock", "scflow"}
         return BackendResult(
-            embeddings={"0": vec, "1": vec, "mean": vec} if cfg.get("method", "scflow") in {"mock", "scflow"} else {},
+            embeddings={"0": vec, "1": vec, "mean": vec} if is_scflow else {},
             image_path=image_path,
-            nfe=int(cfg.get("num_steps", 1)) if cfg.get("method", "scflow") in {"mock", "scflow"} else None,
+            nfe=int(cfg.get("num_steps", 1)) if is_scflow and cfg.get("scflow", {}).get("integration") != "adaptive" else None,
             timing_ms={"feature_ms": elapsed, "decode_ms": 0.0},
             peak_vram_mb=None,
         )

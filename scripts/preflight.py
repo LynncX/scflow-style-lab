@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from runner import load_config, apply_overrides, resolve_project_path
+from experiment_inputs import input_fields, input_paths, integration_options, resolve_sample_inputs
 from sources import validate_source
 
 
@@ -43,10 +44,14 @@ def main():
             raise ValueError("empty manifest")
         data_root = Path(resolve_project_path(cfg.get("data_root", "."), ROOT))
         for sample in samples:
-            for key in ("content_path", "style_path"):
-                file(str(data_root / sample[key]))
+            resolve_sample_inputs(sample, cfg, data_root)
+            for key in input_fields(sample):
+                for path in input_paths(sample, key):
+                    file(path)
     check("manifest and input files", inputs)
     backend = cfg["backend"]
+    if cfg.get("method", backend) == "scflow":
+        check("SCFlow integration options", lambda: integration_options(cfg))
     if backend in {"adain", "stytr2", "styleid"}:
         options = cfg[backend]
         check("pinned source and patches", lambda: validate_source(ROOT, backend, ROOT / options["source"]))
@@ -65,6 +70,11 @@ def main():
                 if not any((directory / name).is_file() for name in ("pytorch_model.bin", "model.safetensors", "pytorch_model.bin.index.json", "model.safetensors.index.json")):
                     raise FileNotFoundError(f"CLIP model weights: {directory}")
             check("local CLIP weights", clip_weights)
+    elif backend == "scflow":
+        options = cfg["scflow"]
+        for key in ("ckpt", "unclip_ckpt"):
+            check(f"weight {key}", lambda key=key: file(options[key]))
+        check("SCFlow model config", lambda: file(options.get("config", "third_party/scflow_pkg/inference.yaml")))
     elif backend != "mock":
         failures.append("backend")
         print(f"[not implemented] preflight for {backend}; this does not imply its runtime is unavailable")
@@ -84,6 +94,8 @@ def main():
             modules += ["scipy", "einops"]
         if backend == "styleid":
             modules += ["omegaconf", "pytorch_lightning", "einops", "transformers", "kornia", "clip", "taming", "tqdm"]
+        if backend == "scflow":
+            modules += ["omegaconf", "pytorch_lightning", "torchdiffeq", "clip"]
         code = "import importlib.util,json; print(json.dumps([m for m in " + repr(modules) + " if importlib.util.find_spec(m) is None]))"
         result = subprocess.run([executable, *command[1:], "-c", code], cwd=ROOT, check=True,
                                 capture_output=True, text=True, timeout=30)

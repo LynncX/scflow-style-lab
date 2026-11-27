@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from runner import run, apply_overrides
 from backends.mock import MockBackend, mock_png
+from evaluation.inputs import prepare_inputs
 
 
 class PipelineTests(unittest.TestCase):
@@ -36,6 +37,28 @@ class PipelineTests(unittest.TestCase):
 
     def records(self):
         return [json.loads(s) for s in (self.out / "records.jsonl").read_text().splitlines()]
+
+    def test_scflow_multi_reference_export_and_resume_tracks_every_input(self):
+        self.cfg.update(method="scflow", scflow={
+            "fusion": "weighted", "integration": "adaptive", "adaptive_threshold": 0.5,
+        })
+        extra = self.root / "extra.png"
+        extra.write_bytes(mock_png(4))
+        for sample in self.samples:
+            sample["style_paths"] = [sample.pop("style_path"), extra.name]
+            sample["style_weights"] = [3, 1]
+        self.save()
+        self.run_pipeline()
+        self.run_pipeline(resume=True)
+        self.assertTrue(all(record["nfe"] is None for record in self.records()))
+        pairs = prepare_inputs(self.out, allow_simulated=True)["pairs"]
+        self.assertEqual(pairs[0]["style_paths"], [str(self.root / "style.png"), str(extra)])
+        self.assertEqual(pairs[0]["style_weights"], [3, 1])
+        extra.write_bytes(mock_png(5))
+        with self.assertRaises(ValueError):
+            self.run_pipeline(resume=True)
+        with self.assertRaisesRegex(ValueError, "image content changed"):
+            prepare_inputs(self.out, allow_simulated=True)
 
     def test_four_methods_exact_pairs_and_resume(self):
         for method in ("scflow", "adain", "stytr2", "styleid"):

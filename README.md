@@ -85,6 +85,14 @@ PYTHONPATH=src python src/runner.py configs/baseline_scflow.yaml \
   --out-dir runs/baseline_1step --resume
 ```
 
+### SCFlow 可选推理策略
+
+- 默认仍是单参考、固定 1 步。固定 4 步可传 `--set num_steps=4`。
+- 自适应使用 `--set scflow.integration=adaptive --set scflow.adaptive_threshold=0.05`（阈值仅为命令示例，不是校准结果）。先跑 1 步，若最终双分支特征的 RMSE **严格超过**阈值，便从相同输入重跑 4 步。只解码最终预测，`nfe` 包含试跑与回退的向量场调用。
+- 多参考样本用有序的 `style_paths` 替代 `style_path`。默认 `scflow.fusion=mean`；传 `--set scflow.fusion=weighted` 时，多参考行须提供与路径对应的非负 `style_weights`，运行时归一化为和为 1。这些权重由 manifest 提供，不自动估计。等权模式可复用同一个带权重的 manifest，但不使用其权重。
+- 例如：`{"sample_id":"pair01","content_path":"c.png","style_paths":["s1.png","s2.png"],"style_weights":[3,1]}`。融合发生在 Flow 输入端；输出中的 `clip_pred_mean` 仍是双分支终点的均值。
+- 每条真实推理记录的 `provenance` 保存积分模式、阈值、一步分支差异、回退标记、采用步数和实际归一化权重。上服务器先用小 manifest 跑 `scripts/preflight.py` 和实际 GPU smoke；mock 不验证阈值效果或真实 NFE。
+
 ## 输出
 
 每次运行在 `runs/<name>/` 下生成：

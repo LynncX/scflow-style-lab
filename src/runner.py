@@ -11,6 +11,7 @@ import subprocess
 from contextlib import redirect_stdout, closing
 from datetime import datetime, timezone
 from pathlib import Path
+from experiment_inputs import input_fields, input_paths, integration_options, resolve_sample_inputs
 
 ENV_OVERRIDES = {
     "SCFLOW_MANIFEST": "manifest",
@@ -137,6 +138,8 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
         raise ValueError(f"Unknown method: {method}")
     if cfg["backend"] != "mock" and method != cfg["backend"]:
         raise ValueError("method must match the real backend")
+    if method == "scflow":
+        integration_options(cfg)
     seen = set()
     data_root = Path(resolve_project_path(cfg.get("data_root", "."), project_root))
     for sample in samples:
@@ -144,15 +147,11 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
         if not isinstance(sid, str) or not re.fullmatch(r"[\w-][\w.-]*", sid) or sid in seen:
             raise ValueError(f"Unsafe or duplicate sample_id: {sid!r}")
         seen.add(sid)
-        for key in ("content_path", "style_path"):
-            value = Path(sample[key])
-            sample[key] = str(value if value.is_absolute() else data_root / value)
-            if not Path(sample[key]).is_file():
-                raise FileNotFoundError(sample[key])
+        resolve_sample_inputs(sample, cfg, data_root)
     identity = {"config": cfg, "samples": samples,
                 "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
                 "inputs_sha256": {p: file_sha256(Path(p))
-                    for p in {s[k] for s in samples for k in ("content_path", "style_path")}}}
+                    for p in {p for s in samples for k in input_fields(s) for p in input_paths(s, k)}}}
     if cfg["backend"] in {"adain", "stytr2", "styleid"}:
         options = cfg[cfg["backend"]]
         from sources import validate_source

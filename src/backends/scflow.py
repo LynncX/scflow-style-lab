@@ -1,11 +1,56 @@
+import math
 import os
 import sys
 import time
 from pathlib import Path
 
-from PIL import Image
-
 from .base import Backend, BackendResult
+from experiment_inputs import integration_options, style_references
+
+
+def fuse_styles(paths, weights, encode):
+    if len(paths) == 1:
+        return encode(paths[0])
+    return sum(encode(path).float() * weight for path, weight in zip(paths, weights))
+
+
+def endpoint_gap(pred):
+    a, b = pred[..., :768].float(), pred[..., 768:].float()
+    return (a - b).square().mean().sqrt().item()
+
+
+def integrate(module, x, steps, threshold):
+    """Use upstream Euler stepping and count actual vector-field evaluations."""
+    nfe = 0
+
+    def count(*_):
+        nonlocal nfe
+        nfe += 1
+
+    hook = module.model.register_forward_hook(count)
+    original_steps = module.val_step_num
+    try:
+        module.val_step_num = steps
+        pred = module.predict_forward(x)
+        gap = None
+        if threshold is not None:
+            gap = endpoint_gap(pred)
+            if not math.isfinite(gap):
+                raise ValueError("Non-finite one-step SCFlow endpoint gap")
+            if gap > threshold:
+                module.val_step_num = 4
+                pred = module.predict_forward(x)
+        selected_steps = module.val_step_num
+    finally:
+        hook.remove()
+        module.val_step_num = original_steps
+    return pred, nfe, {
+        "integration": "fixed" if threshold is None else "adaptive",
+        "one_step_endpoint_rmse": gap,
+        "adaptive_threshold": threshold,
+        "fallback": selected_steps != steps,
+        "selected_steps": selected_steps,
+    }
 
 
 class CLIPEncoder:
@@ -19,6 +64,7 @@ class CLIPEncoder:
 
     def encode_image(self, image_path):
         import torch
+        from PIL import Image
 
         image = Image.open(image_path).convert("RGB")
         x = self.preprocess(image).unsqueeze(0).to(self.device)
@@ -78,7 +124,8 @@ class SCFlowBackend(Backend):
         config_path = self.project_root / sc.get(
             "config", "third_party/scflow_pkg/inference.yaml"
         )
-        steps = int(cfg.get("num_steps", 1))
+        steps, threshold = integration_options(cfg)
+        paths, weights = style_references(sample, cfg)
         save_images = bool(cfg.get("save_images", True))
         model_key = (config_path, ckpt, unclip, steps, save_images, seed)
         model_load_ms = 0.0
@@ -96,6 +143,7 @@ class SCFlowBackend(Backend):
                     test_vis=save_images,
                     unclip_ckpt=str(unclip),
                     val_step_num=steps,
+                    n_intermediates=0,
                     reverse_inference=False,
                     strict=False,
                     map_location="cpu",
@@ -112,7 +160,8 @@ class SCFlowBackend(Backend):
 
         encoder = CLIPEncoder(device)
         c = encoder.encode_image(self.project_root / sample["content_path"]).to(device=device, dtype=module.dtype)
-        s = encoder.encode_image(self.project_root / sample["style_path"]).to(device=device, dtype=module.dtype)
+        s = fuse_styles(paths, weights, lambda path: encoder.encode_image(self.project_root / path))
+        s = s.to(device=device, dtype=module.dtype)
         x = torch.cat([c, s], dim=-1).unsqueeze(1)
         del encoder
 
@@ -120,7 +169,7 @@ class SCFlowBackend(Backend):
             torch.cuda.synchronize(device)
         start = time.perf_counter()
         with torch.no_grad():
-            pred = module.predict_forward(x)
+            pred, nfe, provenance = integrate(module, x, steps, threshold)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         feature_ms = (time.perf_counter() - start) * 1000
@@ -156,7 +205,8 @@ class SCFlowBackend(Backend):
         return BackendResult(
             embeddings=emb,
             image_path=image_path,
-            nfe=steps,
+            nfe=nfe,
             timing_ms={"model_load_ms": model_load_ms, "feature_ms": feature_ms, "decode_ms": decode_ms},
             peak_vram_mb=peak,
+            provenance={**provenance, "fusion": sc.get("fusion", "mean"), "style_weights": weights},
         )
