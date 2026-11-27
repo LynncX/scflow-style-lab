@@ -12,10 +12,11 @@ from .style_fusion import fuse_style_features, style_fusion_settings, style_refe
 class CLIPEncoder:
     def __init__(self, device):
         import clip
-        import torch
 
         self.device = device
-        self.model, self.preprocess = clip.load("ViT-L/14", device=str(device))
+        cache_root = os.environ.get("XDG_CACHE_HOME")
+        download_root = str(Path(cache_root) / "clip") if cache_root else None
+        self.model, self.preprocess = clip.load("ViT-L/14", device=str(device), download_root=download_root)
         self.model.eval()
 
     def encode_image(self, image_path):
