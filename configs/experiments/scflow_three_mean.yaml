@@ -1,0 +1,14 @@
+run_name: scflow_three_mean_1step
+backend: scflow
+seed: 2025
+manifest: /data/wang/XuanyiLi/Data/benchmark/coco_wikiart_v1/manifest.jsonl
+out_root: runs
+num_steps: 1
+save_images: true
+image_size: 512
+scflow:
+  config: third_party/scflow_pkg/inference.yaml
+  ckpt: ckpts/scflow_last.ckpt
+  unclip_ckpt: ckpts/sd21-unclip-l.ckpt
+  model_type: scflow
+  style_fusion: mean

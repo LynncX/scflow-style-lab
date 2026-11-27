@@ -4,6 +4,7 @@ import json
 import struct
 from pathlib import Path
 
+from backends.style_fusion import style_fusion_settings, style_reference_paths
 from runner import file_sha256, write_json
 
 
@@ -14,6 +15,7 @@ def prepare_inputs(run_dir, allow_simulated=False, allow_failures=False):
     if hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest() != fingerprint:
         raise ValueError("Run snapshot fingerprint does not match contents")
     cfg = snapshot["config"]
+    fusion_mode, _ = style_fusion_settings(cfg)
     simulated = cfg["backend"] == "mock"
     if simulated and not allow_simulated:
         raise ValueError("Mock outputs require explicit --allow-simulated; not research results")
@@ -34,10 +36,15 @@ def prepare_inputs(run_dir, allow_simulated=False, allow_failures=False):
             continue
         if record.get("method") != method or record.get("simulated") != simulated:
             raise ValueError(f"Method/simulation mismatch: {sid}")
-        for key in ("content_path", "style_path"):
-            path = sample[key]
-            if record.get(key) != path or file_sha256(Path(path)) != snapshot["inputs_sha256"][path]:
-                raise ValueError(f"Input pair or image content changed: {sid}/{key}")
+        references = style_reference_paths(sample, fusion_mode)
+        keys = ["content_path", "style_path"]
+        if fusion_mode != "single":
+            keys.append("style_paths")
+        if any(record.get(key) != sample[key] for key in keys):
+            raise ValueError(f"Input pair changed: {sid}")
+        for path in [sample["content_path"], *references]:
+            if file_sha256(Path(path)) != snapshot["inputs_sha256"][path]:
+                raise ValueError(f"Input image content changed: {sid}/{path}")
         if not isinstance(record.get("image_path"), str) or not record["image_path"]:
             raise ValueError(f"Evaluation requires PNG image predictions: {sid}")
         image = Path(record["image_path"])
@@ -55,6 +62,8 @@ def prepare_inputs(run_dir, allow_simulated=False, allow_failures=False):
             raise ValueError(f"Wrong prediction dimensions: {sid}")
         pairs.append({"sample_id": sid, "content_path": sample["content_path"], "style_path": sample["style_path"],
                       "prediction_path": str(image), "prediction_sha256": file_sha256(image)})
+        if fusion_mode != "single":
+            pairs[-1]["style_paths"] = references
     if excluded and not allow_failures:
         raise ValueError(f"Run has {len(excluded)} failed/missing samples; --allow-failures explicitly exports a non-comparable subset")
     if not pairs:

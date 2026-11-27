@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from .base import Backend, BackendResult
+from .style_fusion import fuse_style_features, style_fusion_settings, style_reference_paths
 
 
 class CLIPEncoder:
@@ -58,6 +59,8 @@ class SCFlowBackend(Backend):
         from scflow.trainer_module import TrainerModuleSCFlow
 
         sc = cfg["scflow"]
+        fusion_mode, temperature = style_fusion_settings(cfg)
+        style_paths = style_reference_paths(sample, fusion_mode)
         ckpt = self.project_root / sc["ckpt"]
         unclip = self.project_root / sc["unclip_ckpt"]
         for label, path in [("checkpoint", ckpt), ("unclip", unclip)]:
@@ -112,9 +115,22 @@ class SCFlowBackend(Backend):
 
         encoder = CLIPEncoder(device)
         c = encoder.encode_image(self.project_root / sample["content_path"]).to(device=device, dtype=module.dtype)
-        s = encoder.encode_image(self.project_root / sample["style_path"]).to(device=device, dtype=module.dtype)
-        x = torch.cat([c, s], dim=-1).unsqueeze(1)
+        reference_features = [encoder.encode_image(self.project_root / path) for path in style_paths]
         del encoder
+
+        fusion_ms = 0.0
+        weights = [1.0]
+        if fusion_mode == "single":
+            s = reference_features[0]
+        else:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            fusion_start = time.perf_counter()
+            s, reference_weights = fuse_style_features(torch.cat(reference_features), fusion_mode, temperature)
+            weights = reference_weights.tolist()
+            fusion_ms = (time.perf_counter() - fusion_start) * 1000
+        s = s.to(device=device, dtype=module.dtype)
+        x = torch.cat([c, s], dim=-1).unsqueeze(1)
 
         if device.type == "cuda":
             torch.cuda.synchronize(device)
@@ -157,6 +173,13 @@ class SCFlowBackend(Backend):
             embeddings=emb,
             image_path=image_path,
             nfe=steps,
-            timing_ms={"model_load_ms": model_load_ms, "feature_ms": feature_ms, "decode_ms": decode_ms},
+            timing_ms={
+                "model_load_ms": model_load_ms, "style_fusion_ms": fusion_ms,
+                "feature_ms": feature_ms, "decode_ms": decode_ms,
+            },
             peak_vram_mb=peak,
+            provenance={"style_fusion": {
+                "mode": fusion_mode, "references": style_paths, "weights": weights,
+                "temperature": temperature if fusion_mode == "weighted" else None,
+            }},
         )

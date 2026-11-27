@@ -12,6 +12,8 @@ from contextlib import redirect_stdout, closing
 from datetime import datetime, timezone
 from pathlib import Path
 
+from backends.style_fusion import style_fusion_settings, style_reference_paths
+
 ENV_OVERRIDES = {
     "SCFLOW_MANIFEST": "manifest",
     "SCFLOW_OUT_ROOT": "out_root",
@@ -123,8 +125,11 @@ def code_revision(project_root: Path) -> dict:
 
 
 def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: str | None = None, resume: bool = False) -> Path:
@@ -137,22 +142,26 @@ def run(cfg_path: Path, overrides: list[str] | None = None, out_dir_override: st
         raise ValueError(f"Unknown method: {method}")
     if cfg["backend"] != "mock" and method != cfg["backend"]:
         raise ValueError("method must match the real backend")
+    fusion_mode, _ = style_fusion_settings(cfg)
     seen = set()
+    input_paths = set()
     data_root = Path(resolve_project_path(cfg.get("data_root", "."), project_root))
     for sample in samples:
         sid = sample["sample_id"]
         if not isinstance(sid, str) or not re.fullmatch(r"[\w-][\w.-]*", sid) or sid in seen:
             raise ValueError(f"Unsafe or duplicate sample_id: {sid!r}")
         seen.add(sid)
+        references = style_reference_paths(sample, fusion_mode)
         for key in ("content_path", "style_path"):
-            value = Path(sample[key])
-            sample[key] = str(value if value.is_absolute() else data_root / value)
-            if not Path(sample[key]).is_file():
-                raise FileNotFoundError(sample[key])
+            sample[key] = resolve_project_path(sample[key], data_root)
+        if fusion_mode != "single":
+            sample["style_paths"] = [resolve_project_path(path, data_root) for path in references]
+            if len({Path(path).resolve() for path in sample["style_paths"]}) != len(references):
+                raise ValueError(f"{sid}: style_paths must resolve to distinct references")
+        input_paths.update([sample["content_path"], *style_reference_paths(sample, fusion_mode)])
     identity = {"config": cfg, "samples": samples,
                 "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-                "inputs_sha256": {p: file_sha256(Path(p))
-                    for p in {s[k] for s in samples for k in ("content_path", "style_path")}}}
+                "inputs_sha256": {p: file_sha256(Path(p)) for p in sorted(input_paths)}}
     if cfg["backend"] in {"adain", "stytr2", "styleid"}:
         options = cfg[cfg["backend"]]
         from sources import validate_source
