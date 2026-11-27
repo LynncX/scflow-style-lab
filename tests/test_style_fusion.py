@@ -77,7 +77,7 @@ class FeatureFusionTests(unittest.TestCase):
         torch.testing.assert_close(uniform, torch.ones(3) / 3)
 
         fused, weights = fuse_style_features(references, "weighted", temperature=0.1)
-        center = references.mean(dim=0)
+        center = references.mean(dim=0, keepdim=True)
         similarities = torch.nn.functional.cosine_similarity(references, center, dim=1)
         expected_weights = torch.softmax(similarities / 0.1, dim=0)
         torch.testing.assert_close(weights, expected_weights)
